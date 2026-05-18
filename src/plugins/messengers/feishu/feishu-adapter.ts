@@ -10,6 +10,7 @@ import { join } from 'path'
 import { readFile } from 'fs/promises'
 
 const CONFIG_FILE = join(homedir(), '.im-hub', 'config.json')
+const PROCESSED_MESSAGES_TTL = 60 * 1000 // 1 minute
 
 // Message event type from Feishu SDK
 interface MessageReceiveEvent {
@@ -39,8 +40,14 @@ export class FeishuAdapter implements MessengerAdapter {
   private config: FeishuConfig | null = null
   private messageHandler?: (ctx: MessageContext) => Promise<void>
   private isRunning = false
+  private processedMessages = new Map<string, number>() // message_id -> timestamp
 
   async start(): Promise<void> {
+    if (this.isRunning) {
+      console.log('[Feishu] Adapter already running, skipping start')
+      return
+    }
+
     // Load config
     try {
       const data = await readFile(CONFIG_FILE, 'utf-8')
@@ -120,6 +127,15 @@ export class FeishuAdapter implements MessengerAdapter {
   // ============================================
 
   private async handleFeishuMessage(event: MessageReceiveEvent): Promise<void> {
+    const message = event.message
+
+    // Deduplicate messages - skip if already processed
+    const msgId = message.message_id
+    if (msgId && this.processedMessages.has(msgId)) {
+      console.log('[Feishu] Skipping duplicate message:', msgId)
+      return
+    }
+
     console.log('[Feishu] Received message event')
 
     if (!this.messageHandler) {
@@ -128,7 +144,6 @@ export class FeishuAdapter implements MessengerAdapter {
     }
 
     const sender = event.sender
-    const message = event.message
 
     // Skip bot messages
     if (sender.sender_type === 'app') {
@@ -153,6 +168,12 @@ export class FeishuAdapter implements MessengerAdapter {
 
     console.log('[Feishu] Message:', text)
 
+    // Mark message as processed
+    if (msgId) {
+      this.processedMessages.set(msgId, Date.now())
+      this.cleanupProcessedMessages()
+    }
+
     const msg: Message = {
       id: message.message_id || '',
       threadId: message.chat_id || '',
@@ -172,6 +193,15 @@ export class FeishuAdapter implements MessengerAdapter {
       await this.messageHandler(ctx)
     } catch (error) {
       console.error('[Feishu] Error in message handler:', error)
+    }
+  }
+
+  private cleanupProcessedMessages(): void {
+    const cutoff = Date.now() - PROCESSED_MESSAGES_TTL
+    for (const [id, timestamp] of this.processedMessages) {
+      if (timestamp < cutoff) {
+        this.processedMessages.delete(id)
+      }
     }
   }
 }
